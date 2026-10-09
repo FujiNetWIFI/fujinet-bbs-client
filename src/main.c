@@ -24,6 +24,9 @@ static unsigned char terminal_dlist[32];
 /* Short reads keep the keyboard responsive. */
 static unsigned char rx[64];
 /* Read the byte count already reported by status. */
+/* Unit status avoids the URI parser clobbering the error pointer in lib 4.11.2. */
+extern unsigned char network_status_unit(unsigned char unit,
+    unsigned int *waiting, unsigned char *connected, unsigned char *err);
 extern unsigned char sio_read(unsigned char unit, void *buffer,
                               unsigned int length);
 static unsigned char tabs[WIDTH];
@@ -192,7 +195,7 @@ static void return_config(void)
     OS.soundr = initial_sound;
     cold_start();
 }
-static void edit_url(void)
+static bool edit_url(void)
 {
     unsigned int length = 0;
     unsigned char c;
@@ -203,15 +206,25 @@ static void edit_url(void)
         while (!kbhit()) {}
         c = bbs_getkey();
         if (c == 155) break;
-        if (c == 27) return;
-        if (c == 126 && length) { --length; cputs("\b \b"); }
+        if (c == 27) return false;
+        if (c == 126)
+        {
+            if (length)
+            {
+                --length;
+                gotoxy(length % WIDTH, 2 + length / WIDTH);
+                cputc(' ');
+                gotoxy(length % WIDTH, 2 + length / WIDTH);
+            }
+        }
         else if (c >= 32 && c <= 126 && length < 180)
         { candidate[length++] = c; cputc(c); }
     }
     candidate[length] = 0;
     if (length && !directory_https_url(candidate))
-    { notice = "URL must be https://host/path"; return; }
+    { notice = "URL must be https://host/path"; return false; }
     strcpy(directory_url, candidate);
+    return true;
 }
 static void load_directory(void)
 {
@@ -235,7 +248,7 @@ static void load_directory(void)
         idle_frames += (unsigned char)(now-last); last = now;
         if (idle_frames > 1800) { notice = "List timed out - Gateway available"; break; }
         OS.soundr=0;
-        status = network_status(net_uri, &waiting, &connected, &err);
+        status = network_status_unit(1, &waiting, &connected, &err);
         if (status != FN_ERR_OK) break;
         if (waiting)
         {
@@ -315,7 +328,7 @@ static const char *session(unsigned char index)
         {
             last=now;
             OS.soundr=0;
-            result=network_status(net_uri,&waiting,&connected,&err);
+            result=network_status_unit(1,&waiting,&connected,&err);
             last_result=result;last_device_status=err;last_connected=connected;last_waiting=waiting;last_sio_status=PEEK(0x0303);
             if (result != FN_ERR_OK) { message="Status failed"; break; }
             if (!waiting)
@@ -362,7 +375,7 @@ int main(void)
         draw_list(page); key=choice();
         if(key>='A' && key<='Z') key+=32;
         if(key=='c') return_config();
-        else if(key=='u') { edit_url(); load_directory(); page=0; }
+        else if(key=='u') { if (edit_url()) { load_directory(); page=0; } }
         else if(key=='r') { load_directory(); page=0; }
         else if(key=='n' && (page+1)*PAGE_SIZE<board_count) ++page;
         else if(key=='p' && page) --page;
