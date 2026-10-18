@@ -21,6 +21,8 @@ static unsigned char initial_sound, initial_break;
 /* Keep status before closing the channel. */
 static unsigned char last_result, last_device_status, last_connected, last_sio_status;
 static unsigned int last_waiting;
+static bool cleanup_needed;
+static unsigned char cleanup_result;
 /* Keep ANTIC data below the bank-switchable $8000-$BFFF region. */
 static unsigned char * const terminal_dlist=(unsigned char *)0x7800;
 /* Small synchronous reads limit visible pauses while SIO owns the CPU. */
@@ -154,8 +156,7 @@ static void terminal_byte(unsigned char c)
     if (++cx == WIDTH) next_line();
 }
 
-/* Keep the destination pointer across ordinary text; controls retain the
-   complete ATASCII path. Do not change the display timing of received bytes. */
+/* Render text directly; handle ATASCII controls separately. */
 static void render_bytes(const unsigned char *data, unsigned int length)
 {
     unsigned char c;
@@ -478,6 +479,7 @@ static const char *session(unsigned char index)
     unsigned int waiting = 0, count=0;
     const char *message = "Disconnected";
     unsigned char result, review_last=0;
+    bool key_deferred=false;
     bool review_dirty=false;
     last_result=last_device_status=last_connected=last_sio_status=0;
     last_waiting=0;
@@ -489,7 +491,14 @@ static const char *session(unsigned char index)
     while (option()) {}
     if(!five_seconds(true)){message="Connection cancelled";return message;}
     OS.soundr=0;
+    if(cleanup_needed)
+    {
+        cleanup_result=network_close(net_uri);
+        if(cleanup_result!=FN_ERR_OK){message="Cleanup failed; reboot FujiNet";goto finish;}
+        cleanup_needed=false;
+    }
     result=network_open(net_uri,12,0);
+    cleanup_needed=true;
     last_result=result; last_sio_status=PEEK(0x0303); last_device_status=fn_device_error;
     if (result != FN_ERR_OK) { message="Connection failed"; goto finish; }
     clear_terminal(); history_reset(); last=OS.rtclok[2]-1;
@@ -510,9 +519,11 @@ static const char *session(unsigned char index)
             if(key)
             {
             OS.soundr=0;
+            fn_network_error=0;
             result=network_write(net_uri,&key,1);
-            if (result != FN_ERR_OK) { last_result=result;last_device_status=fn_device_error;last_sio_status=PEEK(0x0303);message="Write failed";break; }
-            poll_frames=2; last=OS.rtclok[2];
+            if (result != FN_ERR_OK) { last_result=result;last_device_status=fn_network_error;last_sio_status=PEEK(0x0303);message="Write failed";break; }
+            /* Typing may shorten the interval, but never restart its clock. */
+            if(poll_frames>2)poll_frames=2;
             }
         }
         result=macro_tick();
@@ -533,22 +544,23 @@ static const char *session(unsigned char index)
                 if (err>=128) { message="Network error"; break; }
             }
         }
-        /* A key arriving during status is handled before the next SIO read. */
-        if (kbhit())continue;
+        /* Defer a read once for a pending key, then service incoming data. */
+        if (kbhit() && !key_deferred){key_deferred=true;continue;}
         if (waiting)
         {
             count=waiting<sizeof(rx)?waiting:sizeof(rx);
             OS.soundr=0;
+            fn_network_error=0;
             result=sio_read(1,rx,count);
-            if (result!=FN_ERR_OK) { last_result=result;last_device_status=fn_device_error;last_sio_status=PEEK(0x0303);message="Read failed";break; }
-            waiting-=count; hide_cursor();
+            if (result!=FN_ERR_OK) { last_result=result;last_device_status=fn_network_error;last_sio_status=PEEK(0x0303);message="Read failed";break; }
+            waiting-=count; key_deferred=false; hide_cursor();
             render_bytes(rx,count);
             if(!waiting) { poll_frames=1; last=OS.rtclok[2]; }
         }
         if(panel==2)
         {
             if(count)review_dirty=true;
-            /* A full review redraw per packet competes with live reception. */
+            /* Limit scrollback redraws to once every six frames. */
             if(review_dirty && (unsigned char)(OS.rtclok[2]-review_last)>=6)
             {panel_draw();review_last=OS.rtclok[2];review_dirty=false;}
         }
@@ -561,11 +573,14 @@ finish:
     macro_active=0;
     hide_cursor();
     OS.soundr=0;
-    result=network_close(net_uri);
-    if (result!=FN_ERR_OK) { message="Connection closed; cleanup failed";last_result=result;last_sio_status=PEEK(0x0303); }
+    cleanup_result=network_close(net_uri);
+    cleanup_needed=cleanup_result!=FN_ERR_OK;
     /* Retain the final remote screen (including any busy message). */
     gotoxy(0,21);memset(OS.savmsc+21*WIDTH,0,3*WIDTH);OS.oldchr=0;
     gotoxy(1,21);cputs(message);
+    if(last_result!=FN_ERR_OK)
+    {gotoxy(1,22);cprintf("Result %u Net %u SIO %u",last_result,last_device_status,last_sio_status);}
+    if(cleanup_needed){gotoxy(1,23);cprintf("Cleanup failed: %u",cleanup_result);}
     five_seconds(false);
     while (option()) {}
     return message;
@@ -579,8 +594,7 @@ int main(void)
     const char *message;
     initial_sound=OS.soundr; initial_break=PEEK(0x10)&0x80;
     disable_break(); OS.soundr=0;
-    /* XEX may arrive from CONFIG or another graphics mode. Own the display
-       before network/status menus or the expanded BSS touch inherited buffers. */
+    /* Set up the display before loading the directory and macros. */
     terminal_screen();
     OS.soundr=0;
     if(network_init()!=FN_ERR_OK)

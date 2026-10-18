@@ -1,6 +1,4 @@
-; Capture CH once and translate without blocking OS K:.
-; Briefly mask IRQ only while taking/clearing the one-byte OS key latch.
-; Decoding and keyclick run with the caller's interrupt state restored.
+; Read and clear CH atomically, then decode with IRQ state restored.
 .export _bbs_getkey
 .include "atari.inc"
 .code
@@ -81,8 +79,7 @@ empty:
     lda #0
     tax
     rts
-; Bounded console-speaker keyclick. No OS call or wait for a video timer.
-; Fixed CPU delay preserves audible feedback without another blocking reader.
+; Console keyclick with a fixed delay.
 click:
     ldx #24
     lda #8
