@@ -1,34 +1,59 @@
-FujiNet Netcat - Atari BBS Terminal
+# FujiNet Atari BBS Client
 
-Southern AMIS Projects
+Southern AMIS Projects · Version 2
 
-A standalone ATASCII client for Atari and FujiNet. It follows the original ataribbs.xex raw N: TCP approach and adds an HTTPS directory, direct connections, and a local menu after disconnect. This is new source, and not a patch to the original XEX.
+A 40-column ATASCII terminal for Atari 8-bit computers and FujiNet. Browse the online BBS directory, connect directly to a board, use saved macros, and review recent output without leaving the connection.
 
-Running it
+Run
 
-Mount ataribbs-directory.xex or boot ataribbs-directory.atr. This package does not change the hosted client or CONFIG launcher.
+Pressing G from CONFIG - Launch ataribbs.xex from nfs.fujinet.online
 
-The directory URL is currently not set as awaiting for Mozz to provide a URL. Until the list URL is available, the program a default if no list for the Atari BBS Gateway. Set the URL with U for the current run, or set DIRECTORY_HTTPS_URL in source/src/settings.h and rebuild. A downloaded list replaces that entry; each selection connects to the listed host and port.
+The directory uses `https://fujinet.online/bbs/list/atari8/atascii`. If it cannot be loaded, the client offers the Atari BBS Gateway relay. Up to 32 boards are supported, with 14 entries per page.
 
 Keys
 
-1-8 calls a listed board. N/P changes pages. R reloads the list. U changes the HTTPS list URL. C boots Config. During a connection, Option disconnects.
+Screen Help 
 
-After disconnect: L returns to the list, R reconnects, C boots Config. C starts FujiNet's firmware Config; it does not restore a custom Config ATR previously loaded from SD. Connection errors show status details for troubleshooting.
+| Directory | Enter a BBS number, then Return to connect. Arrows or `<` / `>` select a board. |
+| Directory | N Next page, P Previous page, R Reload, U List URL, M Macros, H Help, C CONFIG. |
+| Connected | SELECT opens local controls. OPTION disconnects. |
+| Local controls | 1–4 sends a saved macro, S opens scrollback, H opens Help, 0 cancels a running macro, Esc returns to the live screen. |
+| Scrollback | Up/down moves one line, left/right moves one page, Esc returns to the live screen. |
+| Disconnected | L returns to the directory, R reconnects, C returns to firmware CONFIG. |
 
-List format
+Shortcut labels appear in inverse; press ordinary letter keys. Directory and scrollback navigation also accept `-` or `_` for up, `=` for down, `+` for left and `*` for right. These aliases do not alter characters sent to the BBS.
 
-Plain text, one entry per line:
+Before connecting, a five-second notice shows the local controls; OPTION cancels it. At disconnect, the last BBS screen is retained briefly with a status message. The BREAK key is disabled while the client runs. Returning to CONFIG boots FujiNet's firmware CONFIG.
 
-Name|hostname|port
+Macros
 
-Comments start with #. Maximum 32 boards, names up to 31 characters, hosts up to 95 characters, ports 1-65535. Hostnames and IPv4 are supported. Downloads are limited to 16 KB. JSON, IPv6 and Telnet negotiation are not implemented. See list-example.txt and list-empty.txt.
+M in the directory opens the macro editor. Four macros of up to 63 characters are stored on the FujiNet SD card. During a connection, use SELECT and then 1–4 to send one.
 
-Building
+- `\r` sends ATASCII Return.
+- `\p` pauses for about one second.
+- `\\` sends a backslash.
 
-From source/, with cc65 and fujinet-lib for Atari installed:
+Typing cancels an active macro. Receiving continues while macros run and while local controls or scrollback are displayed. Scrollback retains the last 64 rendered rows in RAM.
 
-make CC65_HOME=/path/to/cc65 LIBDIR=/path/to/fujinet-lib/4.11.2-atari
+Macros are stored as plain text in `/FujiNet/53414201.key` through `/FujiNet/53414204.key`. Treat files containing passwords as private. Missing files are normal before the first save. 
 
-The library is not a bundle. HTTPS is handled by FujiNet firmware. The official URL and list format still need agreement with the maintainers.
+Build
 
+Require a current cc65 and the Atari FujiNet-lib 4.11.2 header and library. So this is set FNLIB to the directory containing `fujinet-network.h`, `fujinet-fuji.h`, and `fujinet-atari-4.11.2.lib`.
+
+```sh
+FNLIB=/path/to/fujinet-lib CL65=/path/to/cl65 make
+```
+## Tests
+
+BBS Users tested and passed
+
+Tests cover terminal control handling, scrolling, macro storage and playback, directory UI, session scheduling, PAL/NTSC timing, and keyboard translation. 
+
+Some notes
+
+The keyboard reader captures the OS key latch once and translates it locally, avoiding the blocking K: Standard Atari mappings, Caps/Control-lock, Inverse and a light console-speaker keyclick are provided. 
+
+The program layout fits 48K RAM: executable starts at $1200, initialized data ends below $5700, normal BSS ends below $7400, screen is at $7400, display list at $7800, and scrollback at $8000–$89FF. 
+
+This is a raw TCP ATASCII client. Southern Amis Projects

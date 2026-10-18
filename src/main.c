@@ -8,6 +8,7 @@
 #include <fujinet-network.h>
 #include <fujinet-fuji.h>
 #include "directory.h"
+#include "enhancements.h"
 #define WIDTH 40
 #define HEIGHT 24
 #define CELLS (WIDTH * HEIGHT)
@@ -16,14 +17,18 @@ static char directory_url[192] = DIRECTORY_HTTPS_URL;
 static char net_uri[256];
 static const char *notice = "No list URL set";
 static bool fallback_used;
-static unsigned char initial_sound;
+static unsigned char initial_sound, initial_break;
 /* Keep status before closing the channel. */
 static unsigned char last_result, last_device_status, last_connected, last_sio_status;
 static unsigned int last_waiting;
-static unsigned char terminal_dlist[32];
-/* Short reads keep the keyboard responsive. */
+/* Keep ANTIC data below the bank-switchable $8000-$BFFF region. */
+static unsigned char * const terminal_dlist=(unsigned char *)0x7800;
+/* Small synchronous reads limit visible pauses while SIO owns the CPU. */
 static unsigned char rx[64];
 /* Read the byte count already reported by status. */
+/* Unit status avoids the URI parser clobbering the error pointer in lib 4.11.2. */
+extern unsigned char network_status_unit(unsigned char unit,
+    unsigned int *waiting, unsigned char *connected, unsigned char *err);
 extern unsigned char sio_read(unsigned char unit, void *buffer,
                               unsigned int length);
 static unsigned char tabs[WIDTH];
@@ -33,7 +38,13 @@ static bool cursor_shown;
 static unsigned int cursor_position;
 static unsigned char cursor_value;
 extern unsigned char bbs_getkey(void);
-static unsigned char * const pixels = (unsigned char *)0x7400;
+static unsigned char *pixels = (unsigned char *)0x7400;
+static unsigned char live_screen[CELLS];
+static unsigned char panel, history_offset;
+static unsigned char macro_active, macro_position, macro_pause, macro_clock;
+static bool select_held;
+static void panel_draw(void);
+
 
 static void hide_cursor(void)
 {
@@ -68,6 +79,9 @@ static unsigned char screen_code(unsigned char c)
 
 static void clear_terminal(void)
 {
+    unsigned char y;
+    for(y=0;y<HEIGHT;++y)history_add(pixels+y*WIDTH);
+    if(panel==2)history_offset=history_count();
     memset(pixels, 0, CELLS);
     cx = cy = 0;
 }
@@ -77,6 +91,8 @@ static void next_line(void)
     cx = 0;
     if (++cy == HEIGHT)
     {
+        history_add(pixels);
+        if(panel==2 && history_offset<HISTORY_LINES)++history_offset;
         memmove(pixels, pixels + WIDTH, CELLS - WIDTH);
         memset(pixels + CELLS - WIDTH, 0, WIDTH);
         cy = HEIGHT - 1;
@@ -138,6 +154,33 @@ static void terminal_byte(unsigned char c)
     if (++cx == WIDTH) next_line();
 }
 
+/* Keep the destination pointer across ordinary text; controls retain the
+   complete ATASCII path. Do not change the display timing of received bytes. */
+static void render_bytes(const unsigned char *data, unsigned int length)
+{
+    unsigned char c;
+    unsigned char *dest=pixels+(unsigned int)cy*WIDTH+cx;
+    while(length--)
+    {
+        c=*data++;
+        if(!escaped && ((c>=32 && c<125) || (c>=160 && c<253)))
+        {
+            if((c&127)<96)c-=32;
+            *dest++=c;
+            if(++cx==WIDTH)
+            {
+                next_line();
+                dest=pixels+(unsigned int)cy*WIDTH;
+            }
+        }
+        else
+        {
+            terminal_byte(c);
+            dest=pixels+(unsigned int)cy*WIDTH+cx;
+        }
+    }
+}
+
 static void terminal_text(const char *s)
 {
     while (*s) terminal_byte((unsigned char)*s++);
@@ -147,8 +190,13 @@ static void terminal_screen(void)
 {
     unsigned char i;
     OS.sdmctl = 0;
+    POKE(0xd400,0); /* Stop ANTIC while replacing the inherited display. */
+    POKE(0x026f,0); /* GPRIOR shadow: select normal text, not GTIA color modes. */
+    POKE(0xd01b,0); /* Apply normal GTIA priority immediately. */
+    POKE(0xd40e,0x40); /* VBI only; no inherited CONFIG display interrupts. */
+    POKE(0x02f3,2); POKE(0xd401,2); /* Normal character rendering. */
     /* Three blank lines, 24 ANTIC mode-2 rows, jump back to this list. */
-    memset(terminal_dlist, 2, sizeof(terminal_dlist));
+    memset(terminal_dlist, 2, 32);
     terminal_dlist[0] = terminal_dlist[1] = terminal_dlist[2] = 0x70;
     terminal_dlist[3] = 0x42;
     terminal_dlist[4] = 0x7400 & 255;
@@ -164,7 +212,9 @@ static void terminal_screen(void)
     OS.color1 = 0x0e;
     OS.color2 = OS.color4 = 0x90;
     POKE(0xd01d, 0); /* Disable player/missile graphics. */
-    clear_terminal();
+    pixels=(unsigned char *)0x7400; panel=0;
+    history_reset(); macro_active=0; select_held=false;
+    clear_terminal(); history_reset();
     escaped = cursor_shown = false;
     for (i = 0; i < WIDTH; ++i) tabs[i] = (i && !(i & 7));
     OS.sdmctl = 0x22;
@@ -175,6 +225,41 @@ static bool exit_pressed(void)
     return (PEEK(0xd01f) & 4) == 0; /* OPTION is never sent to the BBS. */
 }
 
+/* Disable only BREAK IRQ; retain keyboard and serial interrupts. */
+static void disable_break(void)
+{
+    POKE(0x10,PEEK(0x10)&0x7f);
+    POKE(0xd20e,PEEK(0x10));
+    POKE(0x11,255);
+}
+/* Count frame deltas across the eight-bit clock wrap, on PAL or NTSC. */
+static bool five_seconds(bool cancel)
+{
+    unsigned int remaining=PEEK(0x62)==0?300:250;
+    unsigned char last=OS.rtclok[2],now,elapsed;
+    while(remaining)
+    {
+        if(cancel && exit_pressed())return false;
+        now=OS.rtclok[2];elapsed=now-last;last=now;
+        if(elapsed>=remaining)remaining=0;else remaining-=elapsed;
+    }
+    return true;
+}
+static void help_draw(void)
+{
+    ui_heading("Help / Southern AMIS Projects");
+    gotoxy(1,4);cputs("Enter a BBS number, press Return.");
+    gotoxy(1,6);cputs("Arrows or <> select; N/P pages.");
+    gotoxy(1,8);cputs("In a call, SELECT opens controls.");
+    gotoxy(1,9);cputs("1-4 send macros; S opens scrollback.");
+    gotoxy(1,11);cputs("Scrollback: up/down, left/right");
+    gotoxy(1,12);cputs("pages. Esc returns to the live BBS.");
+    gotoxy(1,14);cputs("OPTION cancels / disconnects.");
+    gotoxy(1,16);cputs("M in directory edits SD macros.");
+    gotoxy(1,17);cputs("Macro: \\r Return, \\p pause, \\\\ slash.");
+    gotoxy(1,19);cputs("40-column ATASCII; BREAK disabled.");
+    ui_footer("Built by Southern AMIS Projects", "Esc Return");
+}
 static bool option(void) { return exit_pressed(); }
 static unsigned char choice(void)
 {
@@ -190,9 +275,11 @@ static void return_config(void)
     if (!fuji_set_boot_mode(0) || !fuji_set_boot_config(1))
     { notice = "CONFIG boot failed; check FujiNet"; return; }
     OS.soundr = initial_sound;
+    POKE(0x10,(PEEK(0x10)&0x7f)|initial_break);
+    POKE(0xd20e,PEEK(0x10));
     cold_start();
 }
-static void edit_url(void)
+static bool edit_url(void)
 {
     unsigned int length = 0;
     unsigned char c;
@@ -203,15 +290,25 @@ static void edit_url(void)
         while (!kbhit()) {}
         c = bbs_getkey();
         if (c == 155) break;
-        if (c == 27) return;
-        if (c == 126 && length) { --length; cputs("\b \b"); }
+        if (c == 27) return false;
+        if (c == 126)
+        {
+            if (length)
+            {
+                --length;
+                gotoxy(length % WIDTH, 2 + length / WIDTH);
+                cputc(' ');
+                gotoxy(length % WIDTH, 2 + length / WIDTH);
+            }
+        }
         else if (c >= 32 && c <= 126 && length < 180)
         { candidate[length++] = c; cputc(c); }
     }
     candidate[length] = 0;
     if (length && !directory_https_url(candidate))
-    { notice = "URL must be https://host/path"; return; }
+    { notice = "URL must be https://host/path"; return false; }
     strcpy(directory_url, candidate);
+    return true;
 }
 static void load_directory(void)
 {
@@ -235,7 +332,7 @@ static void load_directory(void)
         idle_frames += (unsigned char)(now-last); last = now;
         if (idle_frames > 1800) { notice = "List timed out - Gateway available"; break; }
         OS.soundr=0;
-        status = network_status(net_uri, &waiting, &connected, &err);
+        status = network_status_unit(1, &waiting, &connected, &err);
         if (status != FN_ERR_OK) break;
         if (waiting)
         {
@@ -265,67 +362,179 @@ done:
 }
 static void heading(void)
 {
-    clrscr();
-    gotoxy(12,0); cputs("FujiNet Netcat");
-    gotoxy(11,1); cputs("Atari BBS Terminal");
-    gotoxy(0,3); cputs("Southern AMIS Projects");
+    ui_heading("Atari BBS directory");
 }
-static void draw_list(unsigned char page)
+static void draw_number(unsigned char number)
 {
-    unsigned char i, first = page * PAGE_SIZE;
+    /* Clear all 40 cells; keep conio's saved cursor character in sync. */
+    gotoxy(0,21);
+    memset(OS.savmsc+21*WIDTH,0,WIDTH);
+    OS.oldchr=0;
+    gotoxy(1,21); revers(0);
+    if(number)cprintf("Enter BBS number: %u",number);
+    else cputs("Enter BBS number:");
+}
+static void draw_list(unsigned char page, unsigned char selected, unsigned char number)
+{
+    unsigned char i, first=page*PAGE_SIZE;
     heading();
-    gotoxy(0,4); cprintf("BBS Directory                  Page %u/%u",page+1,(board_count+PAGE_SIZE-1)/PAGE_SIZE);
-    gotoxy(0,5); cputs(notice);
-    for (i=0; i<PAGE_SIZE && first+i<board_count; ++i)
+    gotoxy(1,3); cprintf("Page %u/%u  /  %u boards",page+1,(board_count+PAGE_SIZE-1)/PAGE_SIZE,board_count);
+    gotoxy(1,4); cprintf("%.38s",notice);
+    for(i=0;i<PAGE_SIZE && first+i<board_count;++i)
     {
-        gotoxy(2,7+i); cprintf("%u. %s", i+1, boards[first+i].name);
+        gotoxy(1,6+i); revers(i==selected);
+        cprintf("%2u %-32.32s",first+i+1,boards[first+i].name); revers(0);
     }
-    gotoxy(0,8+i); cputs("1-8 Call   N Next   P Previous");
-    gotoxy(0,9+i); cputs("R Reload   U List URL   C Config");
+    ui_footer("Enter BBS number:", "");
+    draw_number(number);
+    gotoxy(1,22);
+    revers(1); cputc('N'); revers(0); cputs(" Next / ");
+    revers(1); cputc('P'); revers(0); cputs(" Previous Page  ");
+    revers(1); cputc('H'); revers(0); cputs(" Help");
+    gotoxy(1,23);
+    revers(1); cputc('R'); revers(0); cputs(" Reload ");
+    revers(1); cputc('U'); revers(0); cputs(" URL ");
+    revers(1); cputc('M'); revers(0); cputs(" Macros ");
+    revers(1); cputc('C'); revers(0); cputs(" Config");
+}
+static void panel_close(void)
+{
+    memcpy((void *)0x7400,live_screen,CELLS);
+    pixels=(unsigned char *)0x7400; panel=0;
+}
+static void panel_draw(void)
+{
+    unsigned char i;
+    if(panel==2){ history_draw(live_screen,history_offset); return; }
+    if(panel==3){help_draw();return;}
+    ui_heading("Local controls / receiving continues");
+    gotoxy(1,5); revers(1);cputc('S');revers(0);cputs("  Review scrollback (64 lines)");
+    gotoxy(1,7); cputs("1-4 Send saved macro:");
+    for(i=0;i<MACRO_COUNT;++i)
+    {gotoxy(2,9+i*2);cprintf("%u %.32s",i+1,macros[i][0]?macros[i]:"(empty)");}
+    gotoxy(1,18);revers(1);cputc('H');revers(0);cputs(" Help / terminal controls");
+    ui_footer("Esc Return   0 Cancel active macro", "OPTION Disconnect / SELECT opens menu");
+}
+static void panel_open(void)
+{
+    hide_cursor(); memcpy(live_screen,(void *)0x7400,CELLS);
+    pixels=live_screen; panel=1; panel_draw();
+}
+/* Local aliases only: never translate characters sent to the remote BBS. */
+static unsigned char navigation_key(unsigned char key)
+{
+    if(key=='<' || key=='-' || key=='_')return 28;
+    if(key=='>' || key=='=')return 29;
+    if(key=='+')return 30;
+    if(key=='*')return 31;
+    return key;
+}
+static void panel_key(unsigned char key)
+{
+    if(key==27){panel_close();return;}
+    if(panel==1)
+    {
+        if(key=='h'||key=='H'){panel=3;panel_draw();}
+        else if(key=='s'||key=='S'){panel=2;history_offset=history_count();panel_draw();}
+        else if(key=='0'){macro_active=0;panel_close();}
+        else if(key>='1'&&key<='4' && macros[key-'1'][0])
+        {macro_active=key-'1'+1;macro_position=macro_pause=0;macro_clock=OS.rtclok[2];panel_close();}
+    }
+    else if(panel==2)
+    {
+        key=navigation_key(key);
+        if(key==28 && history_offset<history_count())++history_offset;
+        if(key==29 && history_offset)--history_offset;
+        if(key==30)history_offset=history_offset+20>history_count()?history_count():history_offset+20;
+        if(key==31)history_offset=history_offset<20?0:history_offset-20;
+        panel_draw();
+    }
+}
+/* Send one macro byte per frame, without blocking incoming traffic. */
+static unsigned char macro_tick(void)
+{
+    unsigned char c,now=OS.rtclok[2],elapsed;
+    if(!macro_active)return FN_ERR_OK;
+    elapsed=now-macro_clock;
+    if(!elapsed)return FN_ERR_OK;
+    macro_clock=now;
+    if(macro_pause){macro_pause=elapsed>=macro_pause?0:macro_pause-elapsed;return FN_ERR_OK;}
+    c=macros[macro_active-1][macro_position++];
+    if(!c){macro_active=0;return FN_ERR_OK;}
+    if(c=='\\')
+    {
+        c=macros[macro_active-1][macro_position];
+        if(c=='r'){++macro_position;c=155;}
+        else if(c=='p'){++macro_position;macro_pause=PEEK(0x62)==0?60:50;return FN_ERR_OK;}
+        else if(c=='\\')++macro_position;
+        else c='\\';
+    }
+    OS.soundr=0;
+    return network_write(net_uri,&c,1);
 }
 static const char *session(unsigned char index)
 {
-    unsigned char key, connected=0, err=0, last, now, poll_frames=3;
-    unsigned int waiting = 0, count, i;
+    unsigned char key, connected=0, err=0, last, now, poll_frames=1;
+    unsigned int waiting = 0, count=0;
     const char *message = "Disconnected";
-    unsigned char result;
+    unsigned char result, review_last=0;
+    bool review_dirty=false;
     last_result=last_device_status=last_connected=last_sio_status=0;
     last_waiting=0;
     sprintf(net_uri,"N1:TCP://%s:%u",boards[index].host,boards[index].port);
-    terminal_screen(); terminal_text(fallback_used ? "Connecting to Gateway relay...\x9bOption: Disconnect\x9b" : "Connecting to selected BBS...\x9bOption: Disconnect\x9b");
+    terminal_screen();
+    terminal_text("Southern AMIS Projects\x9b");
+    terminal_text(boards[index].name);
+    terminal_text("\x9b\x9bSELECT: Macros and Scrollback\x9bOPTION: Cancel / disconnect\x9b");
     while (option()) {}
+    if(!five_seconds(true)){message="Connection cancelled";return message;}
     OS.soundr=0;
     result=network_open(net_uri,12,0);
     last_result=result; last_sio_status=PEEK(0x0303); last_device_status=fn_device_error;
     if (result != FN_ERR_OK) { message="Connection failed"; goto finish; }
-    clear_terminal(); last=OS.rtclok[2]-3;
+    clear_terminal(); history_reset(); last=OS.rtclok[2]-1;
     while (true)
     {
-        if (option()) { message="Connection closed"; break; }
+        if (exit_pressed()) { message="Connection closed"; break; }
+        if((PEEK(0xd01f)&2)==0)
+        {
+            if(!select_held && !panel)panel_open();
+            select_held=true;
+        }
+        else select_held=false;
         if (kbhit())
         {
             key=bbs_getkey();
+            if(panel){panel_key(key);key=0;}
+            else if(macro_active){macro_active=0;}
+            if(key)
+            {
             OS.soundr=0;
             result=network_write(net_uri,&key,1);
             if (result != FN_ERR_OK) { last_result=result;last_device_status=fn_device_error;last_sio_status=PEEK(0x0303);message="Write failed";break; }
-            poll_frames=3; last=OS.rtclok[2]-3;
+            poll_frames=2; last=OS.rtclok[2];
+            }
         }
+        result=macro_tick();
+        if(result!=FN_ERR_OK){message="Macro send failed";last_result=result;break;}
         now=OS.rtclok[2];
         if (!waiting && (unsigned char)(now-last)>=poll_frames)
         {
-            last=now;
             OS.soundr=0;
-            result=network_status(net_uri,&waiting,&connected,&err);
+            result=network_status_unit(1,&waiting,&connected,&err);
             last_result=result;last_device_status=err;last_connected=connected;last_waiting=waiting;last_sio_status=PEEK(0x0303);
             if (result != FN_ERR_OK) { message="Status failed"; break; }
+            last=OS.rtclok[2];
             if (!waiting)
             {
-                poll_frames=12;
+                poll_frames=poll_frames<3?3:poll_frames<6?6:poll_frames<12?12:15;
                 if (!connected || err==136) break;
                 /* Atari error statuses have bit 7 set. */
                 if (err>=128) { message="Network error"; break; }
             }
         }
+        /* A key arriving during status is handled before the next SIO read. */
+        if (kbhit())continue;
         if (waiting)
         {
             count=waiting<sizeof(rx)?waiting:sizeof(rx);
@@ -333,43 +542,80 @@ static const char *session(unsigned char index)
             result=sio_read(1,rx,count);
             if (result!=FN_ERR_OK) { last_result=result;last_device_status=fn_device_error;last_sio_status=PEEK(0x0303);message="Read failed";break; }
             waiting-=count; hide_cursor();
-            for(i=0;i<count;++i) terminal_byte(rx[i]);
-            if(!waiting) { poll_frames=3; last=OS.rtclok[2]-3; }
+            render_bytes(rx,count);
+            if(!waiting) { poll_frames=1; last=OS.rtclok[2]; }
         }
-        show_cursor();
+        if(panel==2)
+        {
+            if(count)review_dirty=true;
+            /* A full review redraw per packet competes with live reception. */
+            if(review_dirty && (unsigned char)(OS.rtclok[2]-review_last)>=6)
+            {panel_draw();review_last=OS.rtclok[2];review_dirty=false;}
+        }
+        else review_dirty=false;
+        count=0;
+        if(!panel)show_cursor();
     }
 finish:
+    if(panel)panel_close();
+    macro_active=0;
     hide_cursor();
     OS.soundr=0;
     result=network_close(net_uri);
     if (result!=FN_ERR_OK) { message="Connection closed; cleanup failed";last_result=result;last_sio_status=PEEK(0x0303); }
+    /* Retain the final remote screen (including any busy message). */
+    gotoxy(0,21);memset(OS.savmsc+21*WIDTH,0,3*WIDTH);OS.oldchr=0;
+    gotoxy(1,21);cputs(message);
+    five_seconds(false);
     while (option()) {}
     return message;
 }
 int main(void)
 {
-    unsigned char key, page=0, selected, saved_font;
+    unsigned char key, page=0, selected, highlight=0, number=0, saved_font;
+    bool prompt_only=false;
     unsigned char *saved_dlist, *saved_pixels;
     unsigned char saved_colors[3];
     const char *message;
-    initial_sound=OS.soundr; OS.soundr=0;
+    initial_sound=OS.soundr; initial_break=PEEK(0x10)&0x80;
+    disable_break(); OS.soundr=0;
+    /* XEX may arrive from CONFIG or another graphics mode. Own the display
+       before network/status menus or the expanded BSS touch inherited buffers. */
+    terminal_screen();
     OS.soundr=0;
     if(network_init()!=FN_ERR_OK)
     { directory_fallback(); fallback_used=true; notice="FujiNet network unavailable"; }
     else load_directory();
+    macros_load();
+    terminal_screen(); /* Reestablish text mode after loader/network/SD activity. */
     while(true)
     {
-        draw_list(page); key=choice();
+        if(prompt_only)draw_number(number);
+        else draw_list(page,highlight,number);
+        prompt_only=false; key=navigation_key(choice());
+        if(key>='0' && key<='9')
+        { if(number<10)number=number*10+key-'0'; prompt_only=true; continue; }
+        if(key==126 && number){number/=10;prompt_only=true;continue;}
+        if(key==27 && number){number=0;prompt_only=true;continue;}
+        if(key!=155)number=0;
+        if(key==28 && highlight){--highlight;continue;}
+        if(key==29 && highlight+1<PAGE_SIZE && page*PAGE_SIZE+highlight+1<board_count){++highlight;continue;}
+        if(key==30)key='p';
+        if(key==31)key='n';
+
         if(key>='A' && key<='Z') key+=32;
         if(key=='c') return_config();
-        else if(key=='u') { edit_url(); load_directory(); page=0; }
-        else if(key=='r') { load_directory(); page=0; }
-        else if(key=='n' && (page+1)*PAGE_SIZE<board_count) ++page;
-        else if(key=='p' && page) --page;
-        else if(key>='1' && key<='8')
+        else if(key=='m')macros_menu();
+        else if(key=='h'){help_draw();while(choice()!=27){}}
+        else if(key=='u') { if (edit_url()) { load_directory(); page=highlight=0; } }
+        else if(key=='r') { load_directory(); page=highlight=0; }
+        else if(key=='n' && (page+1)*PAGE_SIZE<board_count) {++page;highlight=0;}
+        else if(key=='p' && page) {--page;highlight=0;}
+        else if(key==155)
         {
-            selected=page*PAGE_SIZE+key-'1';
-            if(selected>=board_count) continue;
+            selected=number?number-1:page*PAGE_SIZE+highlight;
+            number=0;
+            if(selected>=board_count){notice="Invalid BBS number";continue;}
             /* Restore the normal OS display before drawing local menus. */
             saved_dlist=OS.sdlst; saved_pixels=OS.savmsc; saved_font=OS.chbas;
             saved_colors[0]=OS.color1;saved_colors[1]=OS.color2;saved_colors[2]=OS.color4;

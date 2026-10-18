@@ -7,9 +7,31 @@ unsigned int rejected_lines;
 static char line[192];
 static unsigned int used;
 static bool overlong;
+static bool atascii_type(const char *types)
+{
+    const char *end;
+    unsigned char i, c;
+    while (*types)
+    {
+        end = strchr(types, ',');
+        if (!end) end = types + strlen(types);
+        if (end-types == 7)
+        {
+            for (i=0; i<7; ++i)
+            {
+                c = types[i];
+                if (c >= 'a' && c <= 'z') c -= 32;
+                if (c != "ATASCII"[i]) break;
+            }
+            if (i == 7) return true;
+        }
+        types = *end ? end+1 : end;
+    }
+    return false;
+}
 static void parse_line(void)
 {
-    char *a, *b, *p;
+    char *a, *b, *p, *state, *types;
     unsigned int port = 0, digit;
     Board *entry;
     if (overlong) { ++rejected_lines; return; }
@@ -21,6 +43,18 @@ static void parse_line(void)
     *a++ = 0; b = strchr(a, '|');
     if (!b) { ++rejected_lines; return; }
     *b++ = 0;
+    state = strchr(b, '|');
+    if (state)
+    {
+        *state++ = 0;
+        types = strchr(state, '|');
+        if (!types) goto bad;
+        *types++ = 0;
+        if (strchr(types, '|') || !*types) goto bad;
+        if (!strcmp(state, "inactive")) return;
+        if (strcmp(state, "active")) goto bad;
+        if (!atascii_type(types)) return;
+    }
     if (!line[0] || strlen(line) > 31 || !a[0] || strlen(a) > 95 || !*b)
         goto bad;
     for (p = line; *p; ++p) if ((unsigned char)*p < 32 || (unsigned char)*p > 126) goto bad;
