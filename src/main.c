@@ -398,6 +398,20 @@ static void draw_list(unsigned char page, unsigned char selected, unsigned char 
     revers(1); cputc('M'); revers(0); cputs(" Macros ");
     revers(1); cputc('C'); revers(0); cputs(" Config");
 }
+/* Move the inverse bar without repainting the directory. */
+static void move_highlight(unsigned char old_row, unsigned char new_row)
+{
+    unsigned char i;
+    unsigned char *old_cells, *new_cells;
+    if(old_row==new_row)return;
+    old_cells=OS.savmsc+(6+old_row)*WIDTH+1;
+    new_cells=OS.savmsc+(6+new_row)*WIDTH+1;
+    for(i=0;i<35;++i)
+    {
+        old_cells[i]^=0x80;
+        new_cells[i]^=0x80;
+    }
+}
 static void panel_close(void)
 {
     memcpy((void *)0x7400,live_screen,CELLS);
@@ -588,7 +602,7 @@ finish:
 int main(void)
 {
     unsigned char key, page=0, selected, highlight=0, number=0, saved_font;
-    bool prompt_only=false;
+    bool prompt_only=false, list_dirty=true;
     unsigned char *saved_dlist, *saved_pixels;
     unsigned char saved_colors[3];
     const char *message;
@@ -605,15 +619,24 @@ int main(void)
     while(true)
     {
         if(prompt_only)draw_number(number);
-        else draw_list(page,highlight,number);
+        else if(list_dirty)draw_list(page,highlight,number);
         prompt_only=false; key=navigation_key(choice());
+        list_dirty=true;
         if(key>='0' && key<='9')
         { if(number<10)number=number*10+key-'0'; prompt_only=true; continue; }
         if(key==126 && number){number/=10;prompt_only=true;continue;}
         if(key==27 && number){number=0;prompt_only=true;continue;}
+        if(key==28 || key==29)
+        {
+            if(number){number=0;draw_number(0);}
+            selected=highlight;
+            if(key==28 && highlight)--highlight;
+            if(key==29 && highlight+1<PAGE_SIZE && page*PAGE_SIZE+highlight+1<board_count)++highlight;
+            move_highlight(selected,highlight);
+            list_dirty=false;
+            continue;
+        }
         if(key!=155)number=0;
-        if(key==28 && highlight){--highlight;continue;}
-        if(key==29 && highlight+1<PAGE_SIZE && page*PAGE_SIZE+highlight+1<board_count){++highlight;continue;}
         if(key==30)key='p';
         if(key==31)key='n';
 
