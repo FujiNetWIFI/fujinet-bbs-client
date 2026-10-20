@@ -21,6 +21,8 @@ Screen Help
 | Scrollback | Up/down moves one line, left/right moves one page, Esc returns to the live screen. |
 | Disconnected | L returns to the directory, R reconnects, C returns to firmware CONFIG. |
 
+Up/down selection moves the highlight without redrawing the BBS list. Changing pages refreshes the list.
+
 Shortcut labels appear in inverse; press ordinary letter keys. Directory and scrollback navigation also accept `-` or `_` for up, `=` for down, `+` for left and `*` for right. These aliases do not alter characters sent to the BBS.
 
 Before connecting, a five-second notice shows the local controls; OPTION cancels it. At disconnect, the last BBS screen is retained briefly with a status message. The BREAK key is disabled while the client runs. Returning to CONFIG boots FujiNet's firmware CONFIG.
@@ -44,7 +46,7 @@ Require a current cc65 and the Atari FujiNet-lib 4.11.2 header and library. So t
 ```sh
 FNLIB=/path/to/fujinet-lib CL65=/path/to/cl65 make
 ```
-## Tests
+Tests
 
 BBS Users tested and passed
 
@@ -55,5 +57,7 @@ Some notes
 The keyboard reader captures the OS key latch once and translates it locally, avoiding the blocking K: Standard Atari mappings, Caps/Control-lock, Inverse and a light console-speaker keyclick are provided. 
 
 The program layout fits 48K RAM: executable starts at $1200, initialized data ends below $5700, normal BSS ends below $7400, screen is at $7400, display list at $7800, and scrollback at $8000–$89FF. 
+
+Tested on real hardware, various FujiNet Firmware versions and FujiNet 800 V5.2.0 with Firmware V1.6-b12c4ad7a
 
 This is a raw TCP ATASCII client. Southern Amis Projects
