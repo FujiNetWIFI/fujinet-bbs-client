@@ -8,5 +8,5 @@
 #define FALLBACK_HOST "ataribbs.ddns.net"
 #define FALLBACK_PORT 6502
 #define MAX_BOARDS 32
-#define PAGE_SIZE 8
+#define PAGE_SIZE 14
 #endif

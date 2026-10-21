@@ -1,16 +1,127 @@
-; Read native ATASCII without conio's display cursor side effects.
+; Read and clear CH atomically, then decode with IRQ state restored.
 .export _bbs_getkey
 .include "atari.inc"
 .code
 _bbs_getkey:
-    lda #12
-    sta ICAX1Z
-    jsr keyboard
+    php
+    sei
+    lda CH
+    pha
+    lda #$ff
+    sta CH
+    pla
+    plp
+    cmp #$c0
+    bcs empty
+    tax
+    lda keytable,x
+    cmp #$80
+    beq empty
+    cmp #$81
+    beq inverse
+    cmp #$82
+    beq caps
+    cmp #$83
+    beq shift_caps
+    cmp #$84
+    beq ctrl_caps
+    cmp #$85
+    beq empty
+    cmp #'a'
+    bcc not_alpha
+    cmp #'z'+1
+    bcs not_alpha
+    bit SHFLOK
+    bvs upper
+    bpl not_alpha
+    and #$1f
+upper:
+    and #$df
+not_alpha:
+    pha
+    and #$7f
+    cmp #$1b
+    bcc apply_inverse
+    cmp #$20
+    bcc no_inverse
+    cmp #$7d
+    bcs no_inverse
+apply_inverse:
+    pla
+    eor INVFLG
+    jmp return_key
+no_inverse:
+    pla
+return_key:
+    pha
+    jsr click
+    pla
     ldx #0
     rts
-keyboard:
-    lda KEYBDV+5
-    pha
-    lda KEYBDV+4
-    pha
+caps:
+    lda SHFLOK
+    beq shift_caps
+    lda #0
+    beq set_caps
+shift_caps:
+    lda #$40
+    bne set_caps
+ctrl_caps:
+    lda #$80
+set_caps:
+    sta SHFLOK
+    jmp empty
+inverse:
+    lda INVFLG
+    eor #$80
+    sta INVFLG
+empty:
+    lda #0
+    tax
     rts
+; Console keyclick with a fixed delay.
+click:
+    ldx #24
+    lda #8
+pulse:
+    eor #8
+    sta CONSOL
+    ldy #176
+delay:
+    dey
+    bne delay
+    dex
+    bne pulse
+    rts
+.rodata
+; Table adapted from Altirra Modular Kernel ROM, keyboard scan-code table.
+; Copyright (C) 2008-2016 Avery Lee.
+; Copying and distribution of this file, with or without modification,
+; are permitted in any medium without royalty provided the copyright
+; notice and this notice are preserved. This file is offered as-is,
+; without any warranty.
+keytable:
+    .byte $6C, $6A, $3B, $80, $80, $6B, $2B, $2A	;L   J   ;:  F1  F2  K   +\  *^
+    .byte $6F, $80, $70, $75, $9B, $69, $2D, $3D	;O       P   U   Ret I   -_  =|
+    .byte $76, $80, $63, $80, $80, $62, $78, $7A	;V   Hlp C   F3  F4  B   X   Z
+    .byte $34, $80, $33, $36, $1B, $35, $32, $31	;4$      3#  6&  Esc 5%  2"  1!
+    .byte $2C, $20, $2E, $6E, $80, $6D, $2F, $81	;,[  Spc .]  N       M   /?  Inv
+    .byte $72, $80, $65, $79, $7F, $74, $77, $71	;R       E   Y   Tab T   W   Q
+    .byte $39, $80, $30, $37, $7E, $38, $3C, $3E	;9(      0)  7'  Bks 8@  <   >
+    .byte $66, $68, $64, $80, $82, $67, $73, $61	;F   H   D       Cps G   S   A
+    .byte $4C, $4A, $3A, $80, $80, $4B, $5C, $5E	;L   J   ;:  F1  F2  K   +\  *^
+    .byte $4F, $80, $50, $55, $9B, $49, $5F, $7C	;O       P   U   Ret I   -_  =|
+    .byte $56, $80, $43, $80, $80, $42, $58, $5A	;V   Hlp C   F3  F4  B   X   Z
+    .byte $24, $80, $23, $26, $1B, $25, $22, $21	;4$      3#  6&  Esc 5%  2"  1!
+    .byte $5B, $20, $5D, $4E, $80, $4D, $3F, $80	;,[  Spc .]  N       M   /?  Inv
+    .byte $52, $80, $45, $59, $9F, $54, $57, $51	;R       E   Y   Tab T   W   Q
+    .byte $28, $80, $29, $27, $9C, $40, $7D, $9D	;9(      0)  7'  Bks 8@  <   >
+    .byte $46, $48, $44, $80, $83, $47, $53, $41	;F   H   D       Cps G   S   A
+    .byte $0C, $0A, $7B, $80, $80, $0B, $1E, $1F	;L   J   ;:  F1  F2  K   +\  *^
+    .byte $0F, $80, $10, $15, $9B, $09, $1C, $1D	;O       P   U   Ret I   -_  =|
+    .byte $16, $80, $03, $80, $80, $02, $18, $1A	;V   Hlp C   F3  F4  B   X   Z
+    .byte $80, $80, $85, $80, $1B, $80, $FD, $80	;4$      3#  6&  Esc 5%  2"  1!
+    .byte $00, $20, $60, $0E, $80, $0D, $80, $80	;,[  Spc .]  N       M   /?  Inv
+    .byte $12, $80, $05, $19, $9E, $14, $17, $11	;R       E   Y   Tab T   W   Q
+    .byte $80, $80, $80, $80, $FE, $80, $7D, $FF	;9(      0)  7'  Bks 8@  <   >
+    .byte $06, $08, $04, $80, $84, $07, $13, $01	;F   H   D       Cps G   S   A
