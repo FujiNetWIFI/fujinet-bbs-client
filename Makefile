@@ -25,7 +25,7 @@ SRC_DIRS = src src/%PLATFORM%
 # - a URL to a git repo
 # - empty which will use whatever is the latest
 # - undefined, no fujinet-lib will be used
-FUJINET_LIB =
+FUJINET_LIB = 5.0.1
 
 # HIRESTXT_LIB can be
 # - a version number such as 0.5.1.7
@@ -48,7 +48,10 @@ PLATFORM_COMBOS = \
   msxdos+=msx \
   adam_cpm+=adam
 
+LDFLAGS_EXTRA_ATARI += -C src/atari.cfg
+
 include mekkogx/toplevel-rules.mk
+include release.mk
 
 # If you need to add extra platform-specific steps, do it below:
 #   coco/r2r:: coco/custom-step1
