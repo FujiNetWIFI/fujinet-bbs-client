@@ -6,10 +6,16 @@ A 40-column ATASCII terminal for Atari 8-bit computers and FujiNet. Browse the o
 
 Run
 
-Launch `ataribbs.xex` from FujiNet CONFIG. The release file is intended for
-`tnfs.fujinet.online`, subject to FujiNet team approval.
+Launch `ataribbs.xex` from FujiNet CONFIG. The current version is
+available on `tnfs.fujinet.online`. Add that server to your FujiNet
+TNFS host list.
 
-The directory uses `https://fujinet.online/bbs/list/atari8/atascii`. If it cannot be loaded, the client offers the Atari BBS Gateway relay. Up to 32 boards are supported, with 14 entries per page.
+For FujiNet Go / Atari800, open the FujiNet web interface and under
+Boot Settings set “Enable SIO STATUS wait routine” to “No”, then Save.
+
+The directory uses `https://fujinet.online/bbs/list/atari8/atascii`.
+If it cannot be loaded, the client offers the Atari BBS Gateway relay.
+Up to 32 boards are supported, with 14 entries per page.
 
 Keys
 
@@ -42,12 +48,9 @@ Macros are stored as plain text in `/FujiNet/53414201.key` through `/FujiNet/534
 
 Build
 
-Requires cc65 and FujiNet-lib 5.0.1. The dependency is pinned in the Makefile.
-The source bundle includes the matching library headers, source and Atari archive.
-
-```sh
-make release-xex
-```
+Requires cc65 and FujiNet-lib. This PR retains the existing Makefile
+and mekkogx build setup. An Atari-only Makefile will be addressed
+separately.
 
 Transport
 
