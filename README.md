@@ -1,19 +1,26 @@
 # FujiNet Atari BBS Client
 
-Southern AMIS Projects · Version 2
+Southern AMIS Projects · FujiNet N: Device Client Version 4.0
 
 A 40-column ATASCII terminal for Atari 8-bit computers and FujiNet. Browse the online BBS directory, connect directly to a board, use saved macros, and review recent output without leaving the connection.
 
 Run
 
-Pressing G from CONFIG - Launch ataribbs.xex from nfs.fujinet.online
+Launch `ataribbs.xex` from FujiNet CONFIG. The current version is
+available on `tnfs.fujinet.online`. Add that server to your FujiNet
+TNFS host list.
 
-The directory uses `https://fujinet.online/bbs/list/atari8/atascii`. If it cannot be loaded, the client offers the Atari BBS Gateway relay. Up to 32 boards are supported, with 14 entries per page.
+For FujiNet Go / Atari800, open the FujiNet web interface and under
+Boot Settings set “Enable SIO STATUS wait routine” to “No”, then Save.
+
+The directory uses `https://fujinet.online/bbs/list/atari8/atascii`.
+If it cannot be loaded, the client offers the Atari BBS Gateway relay.
+Up to 32 boards are supported, with 14 entries per page.
 
 Keys
 
-Screen Help 
-
+| Screen | Controls |
+| --- | --- |
 | Directory | Enter a BBS number, then Return to connect. Arrows or `<` / `>` select a board. |
 | Directory | N Next page, P Previous page, R Reload, U List URL, M Macros, H Help, C CONFIG. |
 | Connected | SELECT opens local controls. OPTION disconnects. |
@@ -41,23 +48,23 @@ Macros are stored as plain text in `/FujiNet/53414201.key` through `/FujiNet/534
 
 Build
 
-Require a current cc65 and the Atari FujiNet-lib 4.11.2 header and library. So this is set FNLIB to the directory containing `fujinet-network.h`, `fujinet-fuji.h`, and `fujinet-atari-4.11.2.lib`.
+Requires cc65 and FujiNet-lib. This PR retains the existing Makefile
+and mekkogx build setup. An Atari-only Makefile will be addressed
+separately.
 
-```sh
-FNLIB=/path/to/fujinet-lib CL65=/path/to/cl65 make
-```
-Tests
+Transport
 
-BBS Users tested and passed
+Session status/read commands use one continuous receive interrupt manager for
+ACK, completion, payload and checksum. The receiver is set before COMMAND
+release and reports success only after a complete valid frame. Open/write/close
+use ROM SIO; directory and SD operations use FujiNet-lib. Each session read
+requires fresh status. Read size is set at 256 bytes and keyboard batches
+at 64 bytes; failed reads are not rendered or automatically replayed.
 
-Tests cover terminal control handling, scrolling, macro storage and playback, directory UI, session scheduling, PAL/NTSC timing, and keyboard translation. 
 
-Some notes
+The layout fits 48K RAM: executable starts at $1200, BSS ends below $7400,
+screen is $7400-$77BF, display list $7800-$781F, transport $7820-$7FFF,
+and scrollback $8000-$89FF. A 2 KiB C stack remains below the existing
+PicoBoot MEMTOP of $9C1F.
 
-The keyboard reader captures the OS key latch once and translates it locally, avoiding the blocking K: Standard Atari mappings, Caps/Control-lock, Inverse and a light console-speaker keyclick are provided. 
-
-The program layout fits 48K RAM: executable starts at $1200, initialized data ends below $5700, normal BSS ends below $7400, screen is at $7400, display list at $7800, and scrollback at $8000–$89FF. 
-
-Tested on real hardware, various FujiNet Firmware versions and FujiNet 800 V5.2.0 with Firmware V1.6-b12c4ad7a
-
-This is a raw TCP ATASCII client. Southern Amis Projects
+This is a raw TCP ATASCII client. Southern AMIS Projects.

@@ -18,7 +18,7 @@ static unsigned char history_head, history_used;
 #define BBS_SCREEN ((unsigned char *)0x7400)
 #endif
 static char draft[MACRO_LENGTH+1];
-/* FujiNet-lib 4.11.2 receives a two-byte header plus 64 payload bytes. */
+/* Reserve the complete AppKey frame: two-byte length plus 64-byte payload. */
 static unsigned char appkey_packet[66];
 static const char *macro_status="Macros: not loaded";
 /* Experimental local namespace; coordinate allocation before publishing. */

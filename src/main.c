@@ -9,6 +9,7 @@
 #include <fujinet-fuji.h>
 #include "directory.h"
 #include "enhancements.h"
+#include "transport.h"
 #define WIDTH 40
 #define HEIGHT 24
 #define CELLS (WIDTH * HEIGHT)
@@ -19,20 +20,24 @@ static const char *notice = "No list URL set";
 static bool fallback_used;
 static unsigned char initial_sound, initial_break;
 /* Keep status before closing the channel. */
-static unsigned char last_result, last_device_status, last_connected, last_sio_status;
-static unsigned int last_waiting;
+static unsigned char last_result, last_device_status, last_sio_status;
 static bool cleanup_needed;
 static unsigned char cleanup_result;
 /* Keep ANTIC data below the bank-switchable $8000-$BFFF region. */
 static unsigned char * const terminal_dlist=(unsigned char *)0x7800;
-/* Small synchronous reads limit visible pauses while SIO owns the CPU. */
-static unsigned char rx[64];
-/* Read the byte count already reported by status. */
-/* Unit status avoids the URI parser clobbering the error pointer in lib 4.11.2. */
-extern unsigned char network_status_unit(unsigned char unit,
-    unsigned int *waiting, unsigned char *connected, unsigned char *err);
-extern unsigned char sio_read(unsigned char unit, void *buffer,
-                              unsigned int length);
+/* Session reads reduce command traffic; directory transfers stay at 64 bytes. */
+static unsigned char rx[256];
+static unsigned char tx[64];
+/* Read only a count already reported by network_status. The public 5.0.1
+ * network_read_nb polls until data/EOF, so it can stall the UI on idle TCP.
+ * Atari network_bus_read returns the full SIO frame length or zero. */
+static unsigned char read_pending(unsigned char unit, void *buffer,
+                                  unsigned int length)
+{
+    return network_bus_read(FUJI_DEVICEID_NETWORK + unit - 1,
+                            buffer, length) == length
+        ? FN_ERR_OK : FN_ERR_IO_ERROR;
+}
 static unsigned char tabs[WIDTH];
 static unsigned char cx, cy;
 static bool escaped;
@@ -249,6 +254,7 @@ static bool five_seconds(bool cancel)
 static void help_draw(void)
 {
     ui_heading("Help / Southern AMIS Projects");
+    gotoxy(1,3);cputs("ataribbs.xex - Version 4.0");
     gotoxy(1,4);cputs("Enter a BBS number, press Return.");
     gotoxy(1,6);cputs("Arrows or <> select; N/P pages.");
     gotoxy(1,8);cputs("In a call, SELECT opens controls.");
@@ -333,14 +339,14 @@ static void load_directory(void)
         idle_frames += (unsigned char)(now-last); last = now;
         if (idle_frames > 1800) { notice = "List timed out - Gateway available"; break; }
         OS.soundr=0;
-        status = network_status_unit(1, &waiting, &connected, &err);
+        status = network_status(net_uri, &waiting, &connected, &err);
         if (status != FN_ERR_OK) break;
         if (waiting)
         {
-            count = waiting < sizeof(rx) ? waiting : sizeof(rx);
+            count = waiting < 64 ? waiting : 64;
             if (total > 16384-count) { notice = "List too large - Gateway available"; break; }
             OS.soundr=0;
-            if (sio_read(1, rx, count) != FN_ERR_OK) break;
+            if (read_pending(1, rx, count) != FN_ERR_OK) break;
             for (i=0; i<count; ++i) directory_feed(rx[i]);
             total += count; idle_frames = 0;
         }
@@ -465,6 +471,22 @@ static void panel_key(unsigned char key)
         panel_draw();
     }
 }
+/* Batch at most 64 keys; keep local controls in the foreground loop. */
+#pragma code-name (push, "TRANSPORT")
+static unsigned char session_keys(void)
+{
+    unsigned char key, n=0, attempts=0;
+    do {
+        ++attempts;
+        key=bbs_getkey();
+        if(panel){panel_key(key);key=0;}
+        else if(macro_active){macro_active=0;}
+        if(key)tx[n++]=key;
+    } while(attempts<sizeof(tx) && kbhit());
+    return n;
+}
+#pragma code-name (pop)
+
 /* Send one macro byte per frame, without blocking incoming traffic. */
 static unsigned char macro_tick(void)
 {
@@ -485,118 +507,198 @@ static unsigned char macro_tick(void)
         else c='\\';
     }
     OS.soundr=0;
-    return network_write(net_uri,&c,1);
+    return transport_write(&c,1);
 }
 static const char *session(unsigned char index)
 {
-    unsigned char key, connected=0, err=0, last, now, poll_frames=1;
-    unsigned int waiting = 0, count=0;
+    unsigned char key, connected = 0, err = 0, last, now;
+    unsigned int waiting = 0, count = 0;
     const char *message = "Disconnected";
-    unsigned char result, review_last=0;
-    bool key_deferred=false;
-    bool review_dirty=false;
-    last_result=last_device_status=last_connected=last_sio_status=0;
-    last_waiting=0;
-    sprintf(net_uri,"N1:TCP://%s:%u",boards[index].host,boards[index].port);
+    unsigned char result, review_last = 0;
+    bool receive_again = true;
+    bool review_dirty = false;
+    last_result = last_device_status = last_sio_status = 0;
+    sprintf(net_uri, "N1:TCP://%s:%u", boards[index].host, boards[index].port);
     terminal_screen();
     terminal_text("Southern AMIS Projects\x9b");
     terminal_text(boards[index].name);
     terminal_text("\x9b\x9bSELECT: Macros and Scrollback\x9bOPTION: Cancel / disconnect\x9b");
-    while (option()) {}
-    if(!five_seconds(true)){message="Connection cancelled";return message;}
-    OS.soundr=0;
-    if(cleanup_needed)
+    while (option())
     {
-        cleanup_result=network_close(net_uri);
-        if(cleanup_result!=FN_ERR_OK){message="Cleanup failed; reboot FujiNet";goto finish;}
-        cleanup_needed=false;
     }
-    result=network_open(net_uri,12,0);
-    cleanup_needed=true;
-    last_result=result; last_sio_status=PEEK(0x0303); last_device_status=fn_device_error;
-    if (result != FN_ERR_OK) { message="Connection failed"; goto finish; }
-    clear_terminal(); history_reset(); last=OS.rtclok[2]-1;
+    if (!five_seconds(true))
+    {
+        message = "Connection cancelled";
+        return message;
+    }
+    OS.soundr = 0;
+    transport_begin();
+    if (cleanup_needed)
+    {
+        cleanup_result = transport_close();
+        if (cleanup_result != FN_ERR_OK)
+        {
+            message = "Cleanup failed; reboot FujiNet";
+            transport_end();
+            return message;
+        }
+        cleanup_needed = false;
+    }
+    result = transport_open(net_uri);
+    cleanup_needed = true;
+    last_result = result;
+    last_sio_status = PEEK(0x0303);
+    last_device_status = 0;
+    if (result != FN_ERR_OK)
+    {
+        message = "Connection failed";
+        goto finish;
+    }
+    clear_terminal();
+    history_reset();
+    last = OS.rtclok[2] - 1;
     while (true)
     {
-        if (exit_pressed()) { message="Connection closed"; break; }
-        if((PEEK(0xd01f)&2)==0)
+        if (exit_pressed())
         {
-            if(!select_held && !panel)panel_open();
-            select_held=true;
+            message = "Connection closed";
+            break;
         }
-        else select_held=false;
+        if ((PEEK(0xd01f) & 2) == 0)
+        {
+            if (!select_held && !panel)
+                panel_open();
+            select_held = true;
+        }
+        else
+            select_held = false;
         if (kbhit())
         {
-            key=bbs_getkey();
-            if(panel){panel_key(key);key=0;}
-            else if(macro_active){macro_active=0;}
-            if(key)
+            key = session_keys();
+            if (key)
             {
-            OS.soundr=0;
-            fn_network_error=0;
-            result=network_write(net_uri,&key,1);
-            if (result != FN_ERR_OK) { last_result=result;last_device_status=fn_network_error;last_sio_status=PEEK(0x0303);message="Write failed";break; }
-            /* Typing may shorten the interval, but never restart its clock. */
-            if(poll_frames>2)poll_frames=2;
+                OS.soundr = 0;
+                result = transport_write(tx, key);
+                if (result != FN_ERR_OK)
+                {
+                    last_result = result;
+                    last_device_status = err;
+                    last_sio_status = PEEK(0x0303);
+                    message = "Write failed";
+                    break;
+                }
             }
         }
-        result=macro_tick();
-        if(result!=FN_ERR_OK){message="Macro send failed";last_result=result;break;}
-        now=OS.rtclok[2];
-        if (!waiting && (unsigned char)(now-last)>=poll_frames)
+        result = macro_tick();
+        if (result != FN_ERR_OK)
         {
-            OS.soundr=0;
-            result=network_status_unit(1,&waiting,&connected,&err);
-            last_result=result;last_device_status=err;last_connected=connected;last_waiting=waiting;last_sio_status=PEEK(0x0303);
-            if (result != FN_ERR_OK) { message="Status failed"; break; }
-            last=OS.rtclok[2];
+            message = "Macro send failed";
+            last_result = result;
+            last_sio_status = PEEK(0x0303);
+            break;
+        }
+        now = OS.rtclok[2];
+        /* PROCEED is the normal receive trigger. A one-second safety poll
+         * also detects disconnects if a notification is missed. Recheck
+         * status for every chunk; no cached count survives a keyboard write. */
+        if (transport_notified() || receive_again ||
+            (unsigned char)(now - last) >= (PEEK(0x62) == 0 ? 60 : 50))
+        {
+            receive_again = false;
+            OS.soundr = 0;
+            /* Clear status before polling; failed replies must not authorize reads. */
+            waiting = 0;
+            connected = 0;
+            err = 0;
+            result = transport_status(&waiting, &connected, &err);
+            last_result = result;
+            last_device_status = err;
+            last_sio_status = PEEK(0x0303);
+            if (result != FN_ERR_OK)
+            {
+                message = "Status failed";
+                break;
+            }
+            last = OS.rtclok[2];
             if (!waiting)
             {
-                poll_frames=poll_frames<3?3:poll_frames<6?6:poll_frames<12?12:15;
-                if (!connected || err==136) break;
-                /* Atari error statuses have bit 7 set. */
-                if (err>=128) { message="Network error"; break; }
+                if (err == NETWORK_ERROR_END_OF_FILE)
+                    break;
+                if (err >= 128)
+                {
+                    message = "Network error";
+                    break;
+                }
+                if (!connected)
+                    break;
+            }
+            else
+            {
+                count = waiting < sizeof(rx) ? waiting : sizeof(rx);
+                OS.soundr = 0;
+                result = transport_read(rx, count);
+                if (result != FN_ERR_OK)
+                {
+                    last_result = result;
+                    last_device_status = err;
+                    last_sio_status = PEEK(0x0303);
+                    message = "Read failed";
+                    break;
+                }
+                receive_again = waiting > count || !connected || err >= 128;
+                waiting = 0;
+                hide_cursor();
+                render_bytes(rx, count);
             }
         }
-        /* Defer a read once for a pending key, then service incoming data. */
-        if (kbhit() && !key_deferred){key_deferred=true;continue;}
-        if (waiting)
+        if (panel == 2)
         {
-            count=waiting<sizeof(rx)?waiting:sizeof(rx);
-            OS.soundr=0;
-            fn_network_error=0;
-            result=sio_read(1,rx,count);
-            if (result!=FN_ERR_OK) { last_result=result;last_device_status=fn_network_error;last_sio_status=PEEK(0x0303);message="Read failed";break; }
-            waiting-=count; key_deferred=false; hide_cursor();
-            render_bytes(rx,count);
-            if(!waiting) { poll_frames=1; last=OS.rtclok[2]; }
-        }
-        if(panel==2)
-        {
-            if(count)review_dirty=true;
+            if (count)
+                review_dirty = true;
             /* Limit scrollback redraws to once every six frames. */
-            if(review_dirty && (unsigned char)(OS.rtclok[2]-review_last)>=6)
-            {panel_draw();review_last=OS.rtclok[2];review_dirty=false;}
+            if (review_dirty && (unsigned char)(OS.rtclok[2] - review_last) >= 6)
+            {
+                panel_draw();
+                review_last = OS.rtclok[2];
+                review_dirty = false;
+            }
         }
-        else review_dirty=false;
-        count=0;
-        if(!panel)show_cursor();
+        else
+            review_dirty = false;
+        count = 0;
+        if (!panel)
+            show_cursor();
     }
 finish:
-    if(panel)panel_close();
-    macro_active=0;
+    if (panel)
+        panel_close();
+    macro_active = 0;
     hide_cursor();
-    OS.soundr=0;
-    cleanup_result=network_close(net_uri);
-    cleanup_needed=cleanup_result!=FN_ERR_OK;
+    OS.soundr = 0;
+    cleanup_result = transport_close();
+    cleanup_needed = cleanup_result != FN_ERR_OK;
+    transport_end();
     /* Retain the final remote screen (including any busy message). */
-    gotoxy(0,21);memset(OS.savmsc+21*WIDTH,0,3*WIDTH);OS.oldchr=0;
-    gotoxy(1,21);cputs(message);
-    if(last_result!=FN_ERR_OK)
-    {gotoxy(1,22);cprintf("Result %u Net %u SIO %u",last_result,last_device_status,last_sio_status);}
-    if(cleanup_needed){gotoxy(1,23);cprintf("Cleanup failed: %u",cleanup_result);}
+    gotoxy(0, 21);
+    memset(OS.savmsc + 21 * WIDTH, 0, 3 * WIDTH);
+    OS.oldchr = 0;
+    gotoxy(1, 21);
+    cputs(message);
+    if (last_result != FN_ERR_OK ||
+        (last_device_status >= 128 && last_device_status != NETWORK_ERROR_END_OF_FILE))
+    {
+        gotoxy(1, 22);
+        cprintf("Result %u Net %u SIO %u", last_result, last_device_status, last_sio_status);
+    }
+    if (cleanup_needed)
+    {
+        gotoxy(1, 23);
+        cprintf("Cleanup failed: %u", cleanup_result);
+    }
     five_seconds(false);
-    while (option()) {}
+    while (option())
+    {
+    }
     return message;
 }
 int main(void)
@@ -665,18 +767,14 @@ int main(void)
                 heading();
                 gotoxy(2,5); cputs(boards[selected].name);
                 gotoxy(2,6); cputs(message);
-                if (last_result || (last_device_status>=128 && last_device_status!=136))
-                {
-                    gotoxy(0,8); cprintf("Library %u  SIO %u  Device %u",last_result,last_sio_status,last_device_status);
-                    gotoxy(0,9); cprintf("Connected %u  Waiting %u",last_connected,last_waiting);
-                    gotoxy(0,11); cputs(net_uri);
-                }
                 gotoxy(2,16); cputs("\x14 L  Return to BBS List");
                 gotoxy(2,17); cputs("\x14 R  Reconnect");
                 gotoxy(2,18); cputs("\x14 C  Return to Config");
-                do { key=choice(); if(key>='A'&&key<='Z') key+=32; } while(key!='l'&&key!='r'&&key!='c');
+                do { key=choice(); if(key>='A'&&key<='Z') key+=32;
+                } while(key!='l'&&key!='r'&&key!='c');
                 if(key=='c') { return_config(); key='l'; }
             } while(key=='r');
         }
     }
+    return 0;
 }
