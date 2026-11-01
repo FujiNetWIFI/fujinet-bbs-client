@@ -48,9 +48,47 @@ Macros are stored as plain text in `/FujiNet/53414201.key` through `/FujiNet/534
 
 Build
 
-Requires cc65 and FujiNet-lib. This PR retains the existing Makefile
-and mekkogx build setup. An Atari-only Makefile will be addressed
-separately.
+Requires GNU Make, cc65, curl and unzip. FujiNet-lib defaults to version 5.0.0.
+The Makefile uses `cl65` from `PATH` to compile and link the Atari client:
+
+```sh
+make
+```
+
+The executable is `build/atari/ataribbs.xex`. Object files, dependencies,
+linker map and labels also go in `build/atari/`. The entire `build/` directory
+is ignored by Git. Use `make -j` for a parallel build and `make clean` to
+remove the build outputs.
+
+The build automatically downloads and extracts the selected Atari FujiNet-lib
+release into `_cache/fujinet-lib/<version>-atari` when its library or required
+headers are missing. Subsequent builds reuse that cache without network access.
+Change `FUJINET_LIB_VERSION` at the top of the Makefile or on the command line:
+
+```sh
+make FUJINET_LIB_VERSION=5.0.0
+```
+
+Set `FNLIB_CACHE` to relocate the managed cache. To use an existing extracted
+Atari release, set `FNLIB` to its directory of headers and `.lib` files.
+The library filename is `fujinet-atari-<version>.lib`; override `FNLIB_LIB`
+for another filename. Explicit `FNLIB` or `FNLIB_LIB` overrides disable automatic
+downloads so local libraries are never overwritten. Switching versions or paths
+rebuilds the C objects. FujiNet-lib 4.x does not provide the API used by this client.
+
+cc65 normally locates its own headers and target libraries. For installations
+that cannot, the Makefile checks `/usr/share/cc65` and `/usr/local/share/cc65`.
+Override `CL65` and `CC65_HOME` for other installations; `CC65_HOME` is the
+shared-data directory containing `include/`, `lib/`, `asminc/` and `cfg/`:
+
+```sh
+make CL65=/opt/cc65/bin/cl65 CC65_HOME=/opt/cc65/share/cc65
+make FNLIB=/path/to/fujinet-lib
+```
+
+These settings can be edited at the top of the Makefile, supplied in the
+environment, or passed on the make command line. `CPPFLAGS`, `CFLAGS`,
+`ASFLAGS`, `LDFLAGS`, `LDLIBS`, `BUILD_DIR` and `TARGET` can also be overridden.
 
 Transport
 
